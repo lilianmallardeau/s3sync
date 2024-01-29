@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+from pathlib import Path
+from typing import Dict
+import argparse
+import sys
+
+import boto3
+import dotenv
+
+env: Dict = dotenv.dotenv_values()
+
+class S3Bucket():
+    def __init__(self, api_endpoint: str, api_key: str, api_secret: str, bucket_name: str):
+        self.bucket_name = bucket_name
+        self._s3 = boto3.client(
+            's3',
+            endpoint_url=api_endpoint,
+            aws_access_key_id=api_key,
+            aws_secret_access_key=api_secret,
+        )
+        
+        if not bucket_name in (bucket['Name'] for bucket in self._s3.list_buckets()['Buckets']):
+            self._s3.create_bucket(Bucket=bucket_name)
+
+    def list_files(self) -> Dict[str, Dict]:
+        try:
+            return {
+                obj['Key']: obj
+            for obj in self._s3.list_objects(Bucket=self.bucket_name)['Contents']}
+        except KeyError:
+            return {}
+
+    def upload(self, key: str, filename: Path):
+        self._s3.upload_file(Bucket=self.bucket_name, Key=key, Filename=filename)
+
+    def delete(self, key: str):
+        self._s3.delete_object(Bucket=self.bucket_name, Key=key)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='s3sync',
+        description='Little command line tool to sync a local folder to an S3 bucket.',
+    )
+    parser.add_argument('folder', help='Local folder to sync to the bucket')
+    parser.add_argument('bucket', help='Bucket to sync the local folder to')
+    args = parser.parse_args()
+
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        print(f"The specified directory {str(folder)} doesn't exist or isn't a directory", file=sys.stderr)
+        exit(1)
+
+    bucket = S3Bucket(env['API_ENDPOINT'], env['API_KEY'], env['API_SECRET'], args.bucket)
+    bucket_files = bucket.list_files()
+
+    for file in folder.rglob('*'):
+        if not file.is_file():
+            continue
+        key = str(file.relative_to(folder))
+
+        if key in bucket_files:
+            if file.stat().st_mtime > bucket_files[key]['LastModified'].timestamp():
+                print(f"Updating '{key}'")
+                bucket.upload(key, file)
+            bucket_files.pop(key)
+        else:
+            print(f"Uploading '{key}' to bucket")
+            bucket.upload(key, file)
+
+    for file in bucket_files:
+        print(f"Removing '{file}' from bucket")
+        bucket.delete(file)
+
+
+if __name__ == '__main__':
+    main()
